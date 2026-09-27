@@ -1,6 +1,19 @@
 from dataclasses import dataclass, field
 
 
+@dataclass(frozen=True)
+class GraphEntity:
+    name: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class GraphPlan:
+    use_graph: bool = False
+    entities: tuple[GraphEntity, ...] = ()
+    intents: tuple[str, ...] = ()
+
+
 @dataclass
 class SearchHit:
     chunk_id: str

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import asdict
-from typing import Literal
+from typing import Literal, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,29 +14,18 @@ from app.providers.siliconflow import SiliconFlowProvider
 from app.retrieval.fusion import reciprocal_rank_fusion
 from app.retrieval.milvus import MilvusStore
 from app.retrieval.neo4j_store import Neo4jStore
-from app.retrieval.types import SearchHit
+from app.retrieval.types import GraphPlan, SearchHit
 
 RetrievalMode = Literal["hybrid", "hybrid_graph", "layered", "auto", "comprehensive"]
+logger = logging.getLogger(__name__)
 
 
-def should_expand_graph(query: str) -> bool:
-    signals = (
-        "关系",
-        "比较",
-        "引用",
-        "方法",
-        "数据集",
-        "指标",
-        "实验",
-        "结果",
-        "支持",
-        "反驳",
-        "关联",
-    )
-    return (
-        any(signal in query for signal in signals)
-        or len(re.findall(r"[A-Z][A-Za-z0-9-]{2,}", query)) >= 2
-    )
+class GraphRouteDecision(Protocol):
+    graph: GraphPlan
+
+
+class GraphRouter(Protocol):
+    async def route(self, query: str) -> GraphRouteDecision: ...
 
 
 def entity_candidates(query: str) -> list[str]:
@@ -50,17 +40,26 @@ class RetrievalService:
         milvus: MilvusStore,
         neo4j: Neo4jStore,
         siliconflow: SiliconFlowProvider,
+        rag_router: GraphRouter | None = None,
     ) -> None:
         self.milvus = milvus
         self.neo4j = neo4j
         self.siliconflow = siliconflow
+        self.rag_router = rag_router
 
     async def _graph_hits(
-        self, db: AsyncSession, notebook_id: str, candidates: list[str], limit: int
+        self,
+        db: AsyncSession,
+        notebook_id: str,
+        candidates: list[str],
+        limit: int,
+        graph_plan: GraphPlan,
     ) -> tuple[list[SearchHit], bool]:
         if not await self.neo4j.verify():
             return [], True
-        chunk_ids = await self.neo4j.expand(notebook_id, candidates, limit)
+        chunk_ids = await self.neo4j.search_evidence(
+            notebook_id, list(graph_plan.entities), list(graph_plan.intents), limit
+        )
         if not chunk_ids:
             return [], False
         rows = (
@@ -69,7 +68,11 @@ class RetrievalService:
                 .join(DocumentVersion, Chunk.document_version_id == DocumentVersion.id)
                 .join(Document, DocumentVersion.document_id == Document.id)
                 .join(Section, Chunk.section_id == Section.id, isouter=True)
-                .where(Chunk.id.in_(chunk_ids), Chunk.is_active.is_(True))
+                .where(
+                    Chunk.id.in_(chunk_ids),
+                    Chunk.is_active.is_(True),
+                    Document.notebook_id == notebook_id,
+                )
             )
         ).all()
         ordered = {chunk_id: index for index, chunk_id in enumerate(chunk_ids)}
@@ -138,6 +141,7 @@ class RetrievalService:
         document_ids: list[str] | None,
         mode: RetrievalMode = "auto",
         top_k: int = 8,
+        graph_plan: GraphPlan | None = None,
     ) -> dict[str, object]:
         vector = (await self.siliconflow.embed([query]))[0]
         layered_requested = mode in {"layered", "auto", "comprehensive"}
@@ -189,15 +193,23 @@ class RetrievalService:
                 )
             )
 
-        use_graph = mode in {"hybrid_graph", "comprehensive"} or (
-            mode == "auto" and should_expand_graph(query)
-        )
-        candidates = entity_candidates(query) if use_graph else []
+        if graph_plan is None:
+            if self.rag_router is None:
+                raise RuntimeError("RAG router is required when no graph plan is provided")
+            graph_plan = (await self.rag_router.route(query)).graph
+        use_graph = graph_plan.use_graph
+        candidates = [item.name for item in graph_plan.entities] if use_graph else []
         graph_attempted = bool(use_graph and candidates)
         graph_hits: list[SearchHit] = []
         graph_degraded = False
         if graph_attempted:
-            graph_hits, graph_degraded = await self._graph_hits(db, notebook_id, candidates, 30)
+            try:
+                graph_hits, graph_degraded = await self._graph_hits(
+                    db, notebook_id, candidates, 30, graph_plan
+                )
+            except Exception:
+                logger.exception("Notebook graph retrieval failed; using Milvus results")
+                graph_degraded = True
             if graph_hits:
                 result_sets.append(("neo4j", graph_hits))
 

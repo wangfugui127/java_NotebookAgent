@@ -11,6 +11,7 @@ from app.agent.runtime import AgentRuntime
 from app.agent.types import AgentState
 from app.core.config import Settings
 from app.models import RunStatus
+from app.retrieval.types import GraphEntity, GraphPlan
 
 
 class FakeProvider:
@@ -29,11 +30,14 @@ class FakeProvider:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["rag", "no_rag", "uncertain"])
 async def test_rag_router_uses_only_system_prompt_and_current_query(decision: str) -> None:
-    provider = FakeProvider(f'{{"route":"{decision}"}}')
+    provider = FakeProvider(
+        f'{{"route":"{decision}","use_graph":false,"entities":[],"intents":[]}}'
+    )
 
     result = await LLMRagRouter(provider).route("比较 Notebook 论文的方法")
 
-    assert result == decision
+    assert result.route == decision
+    assert result.graph == GraphPlan()
     assert provider.calls == [
         (
             [
@@ -46,17 +50,54 @@ async def test_rag_router_uses_only_system_prompt_and_current_query(decision: st
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content", ['{"route":"rag","extra":1}', "not json", '[]'])
+@pytest.mark.parametrize("content", ["not json", '[]'])
 async def test_invalid_rag_route_becomes_uncertain(content: str) -> None:
-    assert await LLMRagRouter(FakeProvider(content)).route("这篇呢？") == "uncertain"
+    assert (await LLMRagRouter(FakeProvider(content)).route("这篇呢？")).route == "uncertain"
 
 
 @pytest.mark.asyncio
 async def test_rag_route_provider_failure_becomes_uncertain() -> None:
     assert (
         await LLMRagRouter(FakeProvider(error=OSError("provider unavailable"))).route("论文")
-        == "uncertain"
+    ).route == "uncertain"
+
+
+@pytest.mark.asyncio
+async def test_rag_router_extracts_typed_graph_plan_in_one_call() -> None:
+    provider = FakeProvider(
+        '{"route":"rag","use_graph":true,"entities":['
+        '{"name":"A","kind":"paper"},{"name":"B","kind":"paper"},'
+        '{"name":"X","kind":"dataset"}],'
+        '"intents":["dataset","method","result"]}'
     )
+    decision = await LLMRagRouter(provider).route("比较 A、B 在 X 上的方法和结果")
+
+    assert decision.route == "rag"
+    assert decision.graph == GraphPlan(
+        True,
+        (GraphEntity("A", "paper"), GraphEntity("B", "paper"), GraphEntity("X", "dataset")),
+        ("dataset", "method", "result"),
+    )
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_graph_kind_keeps_vector_rag_but_skips_graph() -> None:
+    decision = await LLMRagRouter(
+        FakeProvider(
+            '{"route":"rag","use_graph":true,"entities":'
+            '[{"name":"X","kind":"unknown"}],"intents":["dataset"]}'
+        )
+    ).route("X")
+    assert decision.route == "rag"
+    assert decision.graph == GraphPlan()
+
+
+@pytest.mark.asyncio
+async def test_legacy_rag_route_still_runs_vector_search() -> None:
+    decision = await LLMRagRouter(FakeProvider('{"route":"rag"}')).route("论文")
+    assert decision.route == "rag"
+    assert decision.graph == GraphPlan()
 
 
 @pytest.mark.asyncio
@@ -66,7 +107,7 @@ async def test_initial_rag_evidence_skips_search_when_route_is_not_rag(decision:
 
     class StubRouter:
         async def route(self, _query):
-            return decision
+            return SimpleNamespace(route=decision, graph=GraphPlan())
 
     runtime.rag_router = StubRouter()
     run = SimpleNamespace(id="run", query="改成表格", notebook_id="notebook", state={})
@@ -92,7 +133,7 @@ async def test_initial_rag_evidence_keeps_every_retrieved_item() -> None:
 
     class StubRouter:
         async def route(self, _query):
-            return "rag"
+            return SimpleNamespace(route="rag", graph=GraphPlan())
 
     class StubRetrieval:
         def __init__(self):
@@ -133,6 +174,7 @@ async def test_initial_rag_evidence_keeps_every_retrieved_item() -> None:
                 "document_ids": ["doc-1"],
                 "mode": "auto",
                 "top_k": 8,
+                "graph_plan": GraphPlan(),
             },
         )
     ]
@@ -144,7 +186,7 @@ async def test_initial_rag_search_failure_leaves_retrieval_to_agent_loop() -> No
 
     class StubRouter:
         async def route(self, _query):
-            return "rag"
+            return SimpleNamespace(route="rag", graph=GraphPlan())
 
     class StubRetrieval:
         async def search(self, *_args, **_kwargs):

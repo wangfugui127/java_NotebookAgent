@@ -3,6 +3,7 @@ from typing import Any
 from neo4j import AsyncGraphDatabase
 
 from app.core.config import Settings
+from app.retrieval.types import GraphEntity
 
 RELATION_TYPES = (
     "USES_METHOD",
@@ -161,6 +162,126 @@ class Neo4jStore:
                 query,
                 names=[name.lower() for name in entity_names],
                 notebook_id=notebook_id,
+                limit=limit,
+            )
+            return [record["chunk_id"] async for record in result]
+
+    async def search_evidence(
+        self,
+        notebook_id: str,
+        entities: list[GraphEntity],
+        intents: list[str],
+        limit: int = 30,
+    ) -> list[str]:
+        """Rank evidence on requested relations, keeping dataset facts in one experiment."""
+        if not entities or not intents:
+            return []
+        names = list(
+            dict.fromkeys(item.name.strip().lower() for item in entities if item.name.strip())
+        )
+        paper_names = [item.name.strip().lower() for item in entities if item.kind == "paper"]
+        dataset_names = [item.name.strip().lower() for item in entities if item.kind == "dataset"]
+        other_names = [
+            item.name.strip().lower()
+            for item in entities
+            if item.kind in {"method", "result", "metric"}
+        ]
+        relation_map = {
+            "method": "USES_METHOD",
+            "dataset": "USES_DATASET",
+            "result": "REPORTS_RESULT",
+        }
+        experiment_types = [relation_map[item] for item in intents if item in relation_map]
+        if not experiment_types and "metric" not in intents and "citation" not in intents:
+            return []
+
+        query = """
+        CALL () {
+            MATCH (p:Paper)-[:HAS_VERSION]->(v:DocumentVersion)
+            MATCH (p)-[:HAS_EXPERIMENT]->(e:Experiment)
+            WHERE p.notebook_id = $notebook_id AND v.notebook_id = $notebook_id
+              AND e.notebook_id = $notebook_id
+              AND (size($paper_names) = 0 OR toLower(trim(p.title)) IN $paper_names)
+            OPTIONAL MATCH (e)-[dataset_rel:USES_DATASET]->(required:Dataset)
+            WHERE required.notebook_id = $notebook_id
+              AND dataset_rel.document_version_id = v.id
+              AND toLower(trim(required.name)) IN $dataset_names
+            WITH p, v, e, dataset_rel
+            WHERE size($dataset_names) = 0 OR dataset_rel IS NOT NULL
+            MATCH (e)-[r]->(target:Entity)
+            WHERE type(r) IN $experiment_types
+              AND r.notebook_id = $notebook_id AND r.document_version_id = v.id
+              AND target.notebook_id = $notebook_id
+              AND ($has_scope OR toLower(trim(target.name)) IN $other_names)
+              AND (type(r) <> 'USES_DATASET' OR size($dataset_names) = 0
+                   OR toLower(trim(target.name)) IN $dataset_names)
+            UNWIND coalesce(r.evidence_chunk_ids, []) AS cid
+            MATCH (v)-[:HAS_CHUNK]->(evidence:Chunk {id: cid})
+            WHERE evidence.notebook_id = $notebook_id
+            RETURN cid AS chunk_id,
+                   3.0 + 2.0 * coalesce(toFloat(r.confidence), 0.5)
+                   + CASE WHEN dataset_rel IS NULL THEN 0.0
+                          ELSE coalesce(toFloat(dataset_rel.confidence), 0.5) END
+                   + CASE WHEN toLower(trim(target.name)) IN $names THEN 2.0 ELSE 0.0 END
+                   AS path_score
+            UNION ALL
+            MATCH (p:Paper)-[:HAS_VERSION]->(v:DocumentVersion)
+            MATCH (p)-[:HAS_EXPERIMENT]->(e:Experiment)
+            WHERE $include_metric AND p.notebook_id = $notebook_id
+              AND v.notebook_id = $notebook_id AND e.notebook_id = $notebook_id
+              AND (size($paper_names) = 0 OR toLower(trim(p.title)) IN $paper_names)
+            OPTIONAL MATCH (e)-[dataset_rel:USES_DATASET]->(required:Dataset)
+            WHERE required.notebook_id = $notebook_id
+              AND dataset_rel.document_version_id = v.id
+              AND toLower(trim(required.name)) IN $dataset_names
+            WITH v, e, dataset_rel
+            WHERE size($dataset_names) = 0 OR dataset_rel IS NOT NULL
+            MATCH (e)-[result_rel:REPORTS_RESULT]->(res:Result)
+                  -[r:MEASURES]->(metric:Metric)
+            WHERE result_rel.document_version_id = v.id
+              AND r.document_version_id = v.id AND r.notebook_id = $notebook_id
+              AND metric.notebook_id = $notebook_id
+              AND ($has_scope OR toLower(trim(metric.name)) IN $other_names)
+            UNWIND coalesce(r.evidence_chunk_ids, []) AS cid
+            MATCH (v)-[:HAS_CHUNK]->(evidence:Chunk {id: cid})
+            WHERE evidence.notebook_id = $notebook_id
+            RETURN cid AS chunk_id,
+                   2.5 + coalesce(toFloat(result_rel.confidence), 0.5)
+                   + 2.0 * coalesce(toFloat(r.confidence), 0.5)
+                   + CASE WHEN dataset_rel IS NULL THEN 0.0
+                          ELSE coalesce(toFloat(dataset_rel.confidence), 0.5) END
+                   + CASE WHEN toLower(trim(metric.name)) IN $names THEN 2.0 ELSE 0.0 END
+                   AS path_score
+            UNION ALL
+            MATCH (source:Entity)-[r:CITES]->(target:Entity)
+            WHERE $include_citation AND source.notebook_id = $notebook_id
+              AND target.notebook_id = $notebook_id AND r.notebook_id = $notebook_id
+              AND (toLower(trim(source.name)) IN $names
+                   OR toLower(trim(target.name)) IN $names)
+            UNWIND coalesce(r.evidence_chunk_ids, []) AS cid
+            MATCH (v:DocumentVersion {id: r.document_version_id})
+                  -[:HAS_CHUNK]->(evidence:Chunk {id: cid})
+            WHERE v.notebook_id = $notebook_id AND evidence.notebook_id = $notebook_id
+            RETURN cid AS chunk_id,
+                   3.5 + 2.0 * coalesce(toFloat(r.confidence), 0.5) AS path_score
+        }
+        WITH chunk_id, sum(path_score) AS score, count(*) AS path_count
+        RETURN chunk_id
+        ORDER BY score DESC, path_count DESC, chunk_id ASC
+        LIMIT $limit
+        """
+        async with self.driver.session() as session:
+            result = await session.run(
+                query,
+                notebook_id=notebook_id,
+                names=names,
+                paper_names=paper_names,
+                dataset_names=dataset_names,
+                other_names=other_names,
+                has_scope=bool(paper_names or dataset_names),
+                experiment_types=experiment_types,
+                include_metric="metric" in intents,
+                include_citation="citation" in intents,
                 limit=limit,
             )
             return [record["chunk_id"] async for record in result]

@@ -6,10 +6,12 @@ import yaml
 from mcp.server import MCPServer
 from sqlalchemy import select
 
+from app.agent.rag_router import LLMRagRouter
 from app.core.config import get_settings
 from app.core.database import SessionFactory
 from app.core.security import decode_token
 from app.models import Chunk, Document, DocumentVersion, Notebook, Section
+from app.providers.deepseek import DeepSeekProvider
 from app.providers.openalex import OpenAlexProvider
 from app.providers.siliconflow import SiliconFlowProvider
 from app.retrieval.milvus import MilvusStore
@@ -69,18 +71,23 @@ async def search_notebook(
 ) -> dict[str, Any]:
     """Search an authorized notebook using hybrid retrieval and optional graph expansion."""
     await _authorize(access_token, notebook_id)
+    provider = DeepSeekProvider(settings)
     service = RetrievalService(
-        MilvusStore(settings), Neo4jStore(settings), SiliconFlowProvider(settings)
+        MilvusStore(settings), Neo4jStore(settings), SiliconFlowProvider(settings),
+        LLMRagRouter(provider),
     )
-    async with SessionFactory() as db:
-        return await service.search(
-            db,
-            notebook_id=notebook_id,
-            query=query,
-            document_ids=None,
-            mode=retrieval_mode,  # type: ignore[arg-type]
-            top_k=min(max(top_k, 1), 20),
-        )
+    try:
+        async with SessionFactory() as db:
+            return await service.search(
+                db,
+                notebook_id=notebook_id,
+                query=query,
+                document_ids=None,
+                mode=retrieval_mode,  # type: ignore[arg-type]
+                top_k=min(max(top_k, 1), 20),
+            )
+    finally:
+        await provider.close()
 
 
 @mcp_server.tool()

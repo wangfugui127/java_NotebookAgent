@@ -6,6 +6,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from jsonschema import ValidationError as JsonSchemaValidationError
+from jsonschema import validate as validate_json_schema
 from pydantic import BaseModel, ValidationError
 
 from app.agent.types import AgentState, ToolObservation, ToolSummary
@@ -140,6 +142,12 @@ class ToolRegistry:
             return ToolObservation(False, name, {}, "tool_not_found")
         try:
             if definition.source == "mcp":
+                try:
+                    validate_json_schema(arguments, definition.raw_schema or {"type": "object"})
+                except JsonSchemaValidationError as exc:
+                    return ToolObservation(
+                        False, name, {"details": [exc.message]}, "invalid_arguments"
+                    )
                 result = await context.mcp.call_tool(name, arguments)
             else:
                 assert definition.arguments_model is not None and definition.handler is not None

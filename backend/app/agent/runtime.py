@@ -80,7 +80,9 @@ class AgentRuntime:
         self.rag_router = LLMRagRouter(self.provider)
         self.openalex = OpenAlexProvider(settings)
         siliconflow = SiliconFlowProvider(settings)
-        self.retrieval = RetrievalService(MilvusStore(settings), Neo4jStore(settings), siliconflow)
+        self.retrieval = RetrievalService(
+            MilvusStore(settings), Neo4jStore(settings), siliconflow, self.rag_router
+        )
         self.mcp = mcp
         self.registry = registry or build_native_registry()
         self.registry.register_mcp(list(mcp.tools.values()))
@@ -423,7 +425,8 @@ class AgentRuntime:
     ) -> list[dict[str, Any]]:
         if run.state.get("pending_batch"):
             return []
-        if await self.rag_router.route(run.query) != "rag":
+        decision = await self.rag_router.route(run.query)
+        if decision.route != "rag":
             return []
         try:
             result = await self.retrieval.search(
@@ -433,6 +436,7 @@ class AgentRuntime:
                 document_ids=allowed_documents,
                 mode="auto",
                 top_k=8,
+                graph_plan=decision.graph,
             )
         except Exception:
             logger.exception("Initial Notebook RAG search failed for run %s", run.id)
@@ -836,6 +840,7 @@ class AgentRuntime:
             ]
             self._sync_tool_catalog(messages, tool_catalog)
             schemas = self.registry.schemas(candidate_names)
+            # omissions当前工具新加入，可能引起压缩，这是压缩的东西的简要记录
             messages, omissions = await self._compact_working_messages(
                 run, messages, estimate_tokens(str(schemas))
             )

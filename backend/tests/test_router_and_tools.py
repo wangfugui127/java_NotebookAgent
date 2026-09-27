@@ -223,3 +223,43 @@ def test_provider_alias_keeps_dotted_mcp_name_internal() -> None:
     assert alias == "mcp__example__search"
     registry.definitions["mcp.example.search"] = registry.definitions["search_notebook"]
     assert registry.resolve_provider_name(alias) == "mcp.example.search"
+
+
+@pytest.mark.asyncio
+async def test_mcp_arguments_are_validated_before_calling_server() -> None:
+    name = "mcp.example.search"
+    registry = build_native_registry()
+    registry.register(
+        ToolDefinition(
+            name=name,
+            description="Search papers",
+            arguments_model=None,
+            risk="read",
+            handler=None,
+            source="mcp",
+            raw_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        )
+    )
+
+    class FakeMcp:
+        def __init__(self):
+            self.calls = []
+
+        async def call_tool(self, tool_name, arguments):
+            self.calls.append((tool_name, arguments))
+            return {"content": "found"}
+
+    mcp = FakeMcp()
+    context = SimpleNamespace(mcp=mcp)
+    invalid = await registry.dispatch(name, {"query": 123}, context)
+    missing = await registry.dispatch(name, {}, context)
+    valid = await registry.dispatch(name, {"query": "climate"}, context)
+
+    assert invalid.ok is False and invalid.error_code == "invalid_arguments"
+    assert missing.ok is False and missing.error_code == "invalid_arguments"
+    assert valid.ok is True and valid.content == {"content": "found"}
+    assert mcp.calls == [(name, {"query": "climate"})]
