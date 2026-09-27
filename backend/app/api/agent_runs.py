@@ -2,19 +2,44 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, HTTPException, Request
+from redis.asyncio import Redis
 from sqlalchemy import select
 from sse_starlette.sse import EventSourceResponse
 
+from app.agent.events import EventStore
 from app.agent.run_service import create_agent_run
 from app.agent.tasks import execute_agent_run_task
 from app.api.dependencies import CurrentUser, DbSession
+from app.core.config import get_settings
 from app.core.database import SessionFactory
 from app.models import AgentRun, ApprovalRequest, Conversation, RunEvent, RunStatus
 from app.schemas import AgentRunCreate, AgentRunView, ApprovalResolve
 
 router = APIRouter(tags=["agent"])
+
+TERMINAL_EVENTS = {"run_completed", "run_failed", "run_cancelled"}
+
+
+def _sse_event(event: RunEvent) -> dict[str, str]:
+    return {
+        "id": str(event.sequence),
+        "event": event.event_type,
+        "data": json.dumps(event.payload, ensure_ascii=False, default=str),
+    }
+
+
+async def _open_pubsub(redis_url: str, channel: str) -> tuple[Redis | None, object | None]:
+    """Best-effort live channel; returns (None, None) when Redis is unavailable."""
+    try:
+        redis = Redis.from_url(redis_url, decode_responses=True)
+        pubsub = redis.pubsub()
+        await pubsub.subscribe(channel)
+    except Exception:
+        return None, None
+    return redis, pubsub
 
 
 async def owned_run(db: DbSession, run_id: str, user_id: str) -> AgentRun:
@@ -68,38 +93,95 @@ async def stream_events(
         request.headers.get("last-event-id") or request.query_params.get("after") or 0
     )
 
+    async def replay(session, after: int) -> list[RunEvent]:
+        return list(
+            (
+                await session.execute(
+                    select(RunEvent)
+                    .where(RunEvent.run_id == run_id, RunEvent.sequence > after)
+                    .order_by(RunEvent.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
     async def generator():
         cursor = last_event_id
-        while True:
-            if await request.is_disconnected():
-                return
+        settings = get_settings()
+        redis, pubsub = await _open_pubsub(settings.redis_url, EventStore.channel(run_id))
+        last_activity = time.monotonic()
+        try:
+            # 1) Replay committed durable events (fills gaps from a lost publish).
             async with SessionFactory() as session:
-                events = (
-                    (
-                        await session.execute(
-                            select(RunEvent)
-                            .where(RunEvent.run_id == run_id, RunEvent.sequence > cursor)
-                            .order_by(RunEvent.sequence)
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                for event in events:
+                for event in await replay(session, cursor):
                     cursor = event.sequence
-                    yield {
-                        "id": str(event.sequence),
-                        "event": event.event_type,
-                        "data": json.dumps(event.payload, ensure_ascii=False, default=str),
-                    }
-                run = await session.get(AgentRun, run_id)
-                if (
-                    run
-                    and run.status in {RunStatus.completed, RunStatus.failed, RunStatus.cancelled}
-                    and not events
-                ):
+                    yield _sse_event(event)
+                    if event.event_type in TERMINAL_EVENTS:
+                        return
+            # 2) Forward the live channel. Only query the database after a
+            #    silence period (or while Redis is down), never per delta.
+            while True:
+                if await request.is_disconnected():
                     return
-            await asyncio.sleep(0.5)
+                message = None
+                if pubsub is not None:
+                    try:
+                        message = await pubsub.get_message(
+                            ignore_subscribe_messages=True, timeout=0.5
+                        )
+                    except Exception:
+                        pubsub = None
+                if message and message.get("type") == "message":
+                    last_activity = time.monotonic()
+                    data = json.loads(message["data"])
+                    sequence = data.get("sequence")
+                    if sequence is None:
+                        yield {
+                            "event": data["type"],
+                            "data": json.dumps(
+                                data["payload"], ensure_ascii=False, default=str
+                            ),
+                        }
+                    elif int(sequence) > cursor:
+                        cursor = int(sequence)
+                        yield {
+                            "id": str(sequence),
+                            "event": data["type"],
+                            "data": json.dumps(
+                                data["payload"], ensure_ascii=False, default=str
+                            ),
+                        }
+                        if data["type"] in TERMINAL_EVENTS:
+                            return
+                    continue
+                if pubsub is not None and time.monotonic() - last_activity < 2.0:
+                    continue
+                last_activity = time.monotonic()
+                status: RunStatus | None = None
+                events: list[RunEvent] = []
+                async with SessionFactory() as session:
+                    events = await replay(session, cursor)
+                    for event in events:
+                        cursor = event.sequence
+                        yield _sse_event(event)
+                        if event.event_type in TERMINAL_EVENTS:
+                            return
+                    run = await session.get(AgentRun, run_id)
+                    status = run.status if run else None
+                if status in {RunStatus.completed, RunStatus.failed, RunStatus.cancelled}:
+                    return
+                if pubsub is None:
+                    await asyncio.sleep(0.5)
+        finally:
+            if pubsub is not None:
+                try:
+                    await pubsub.unsubscribe(EventStore.channel(run_id))
+                except Exception:
+                    pass
+                await pubsub.aclose()
+            if redis is not None:
+                await redis.aclose()
 
     return EventSourceResponse(generator())
 

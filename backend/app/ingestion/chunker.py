@@ -66,10 +66,14 @@ MAX_SECTIONS = 64
 MIN_SECTION_CHARS = 200
 
 MARKDOWN_HEADING = re.compile(r"(?m)^#{1,6}\s+(.+?)\s*$")
-NUMBERED_HEADING = re.compile(r"(?m)^(\d+(?:\.\d+){0,3})[.、]?\s+([^\n]{1,64})$")
+NUMBERED_HEADING = re.compile(
+    r"(?m)^((?:\d+(?:\.\d+){0,3})|(?:[A-Z](?:\.\d+){0,3}))[.、]?\s+([^\n]{1,64})$"
+)
+SECTION_PREFIX = re.compile(r"^(?:\d+(?:\.\d+){0,3}|[A-Z](?:\.\d+){0,3})[.、]?\s+")
 
 
 def _is_heading(title: str) -> bool:
+    title = SECTION_PREFIX.sub("", title.strip(), count=1).strip()
     if not title or len(title) > 64:
         return False
     if title[-1] in ".。;；,，:：":
@@ -130,25 +134,24 @@ def _build_sections(
 
 def detect_sections(parsed: ParsedDocument) -> list[SectionDraft]:
     text = parsed.text
-    markdown = [
+    candidates: list[tuple[int, str]] = [
         (match.start(), match.group(1).strip())
         for match in MARKDOWN_HEADING.finditer(text)
         if _is_heading(match.group(1).strip())
     ]
-    if markdown:
-        return _build_sections(parsed, markdown)
-    numbered = [
+    candidates.extend(
         (match.start(), match.group(2).strip())
         for match in NUMBERED_HEADING.finditer(text)
         if _is_heading(match.group(2).strip())
-    ]
-    if len(numbered) > MAX_SECTIONS:
+    )
+    deduped: dict[int, str] = {}
+    for position, title in sorted(candidates, key=lambda item: item[0]):
+        deduped.setdefault(position, title)
+    ordered = [(position, title) for position, title in sorted(deduped.items())]
+    if not ordered or len(ordered) > MAX_SECTIONS:
         page_start, page_end = _pages_for(parsed, 0, len(text))
         return [SectionDraft(0, "正文", 0, len(text), page_start, page_end)]
-    if not numbered:
-        page_start, page_end = _pages_for(parsed, 0, len(text))
-        return [SectionDraft(0, "正文", 0, len(text), page_start, page_end)]
-    return _build_sections(parsed, numbered)
+    return _build_sections(parsed, ordered)
 
 
 def _split_section(

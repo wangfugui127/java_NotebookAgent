@@ -107,3 +107,57 @@ def test_attachment_switches_to_windows_before_effective_budget_is_full() -> Non
     )
     assert len(packets) > 1
     assert all(item.manifest.estimated_tokens <= 3_800 for item in packets)
+
+
+def test_rag_evidence_is_counted_and_shared_across_attachment_windows() -> None:
+    settings = Settings(
+        model_context_window=4_000,
+        max_output_tokens=400,
+        context_safety_ratio=1.0,
+    )
+    builder = ContextBuilder(settings)
+    envelope = QueryEnvelope("比较这些论文", [payload("附件正文。" * 2_000)])
+    evidence = [
+        {"evidence_id": f"evidence-{index}", "text": f"检索片段 {index}"}
+        for index in range(8)
+    ]
+
+    without_rag = builder.fixed_layer_tokens(envelope, summary=None, state=state())
+    with_rag = builder.fixed_layer_tokens(
+        envelope, summary=None, state=state(), evidence=evidence
+    )
+    packets = builder.build_packets(
+        envelope, history=[], summary=None, state=state(), evidence=evidence
+    )
+
+    assert with_rag > without_rag
+    assert len(packets) > 1
+    assert all(
+        item.manifest.layers["evidence"] == estimate_tokens(str(evidence)) for item in packets
+    )
+    assert all(
+        all(entry["evidence_id"] in item.messages[1]["content"] for entry in evidence)
+        for item in packets
+    )
+
+
+def test_tool_schemas_consume_input_budget_without_becoming_messages() -> None:
+    settings = Settings(
+        model_context_window=10_000,
+        max_output_tokens=1_000,
+        context_safety_ratio=0.9,
+    )
+    builder = ContextBuilder(settings)
+    envelope = QueryEnvelope("问题")
+    schemas = [
+        {"type": "function", "function": {"name": "search_notebook", "parameters": {}}}
+    ]
+
+    without = builder.build_packets(envelope, history=[], summary=None, state=state())[0]
+    with_tools = builder.build_packets(
+        envelope, history=[], summary=None, state=state(), tool_schemas=schemas
+    )[0]
+
+    assert with_tools.manifest.layers["tool_schemas"] == estimate_tokens(str(schemas))
+    assert with_tools.manifest.estimated_tokens > without.manifest.estimated_tokens
+    assert with_tools.messages == without.messages

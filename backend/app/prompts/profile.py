@@ -12,19 +12,9 @@ JSON 字段：
 - time_range: 时间范围，没有则空字符串
 - authors: 作者字符串数组
 - year: 发表年份整数，未知则为 null
-- abstract: 论文原始摘要。若用户消息已提供摘要，原样保留；否则用一段忠实概括填充
-只依据提供的论文内容，不得编造未出现的数据或结论。"""
+- abstract: 论文原始摘要。请从全文中定位原始摘要；定位不到时用一段忠实概括填充
+只依据提供的论文全文，不得编造未出现的数据或结论。"""
 
 
-def document_profile_prompt(
-    title: str,
-    abstract: str,
-    section_titles: list[str],
-    excerpt: str,
-) -> str:
-    return (
-        f"标题：{title}\n"
-        f"已知摘要：{abstract or '（原文未检测到，请依据正文概括）'}\n"
-        f"章节标题：{'、'.join(section_titles[:40]) or '（无）'}\n"
-        f"正文节选：\n{excerpt}"
-    )
+def document_profile_prompt(title: str, full_text: str) -> str:
+    return f"标题：{title}\n论文全文：\n{full_text}"

@@ -4,7 +4,10 @@ import json
 import re
 from typing import Any
 
+from app.agent.context_builder import estimate_tokens
 from app.prompts.profile import DOCUMENT_PROFILE_SYSTEM_PROMPT, document_profile_prompt
+
+PROFILE_BUDGET_MARGIN = 512
 
 ABSTRACT_MARKERS = ("abstract", "摘要")
 KEYWORD_MARKERS = ("keywords", "key words", "关键词", "关键字")
@@ -95,9 +98,9 @@ async def build_document_profile(
     *,
     title: str,
     full_text: str,
-    section_titles: list[str],
     provider: Any,
     model_name: str,
+    max_input_tokens: int,
 ) -> dict[str, Any]:
     abstract = extract_abstract(full_text)
     keywords = extract_keywords(full_text)
@@ -107,17 +110,21 @@ async def build_document_profile(
     extractor_model = "heuristic"
 
     if provider is not None:
-        excerpt = full_text[:8000]
+        prompt = document_profile_prompt(title, full_text)
+        needed = (
+            estimate_tokens(DOCUMENT_PROFILE_SYSTEM_PROMPT)
+            + estimate_tokens(prompt)
+            + PROFILE_BUDGET_MARGIN
+        )
+        if needed > max_input_tokens:
+            raise ValueError(
+                f"document profile input exceeds budget: {needed} > {max_input_tokens} tokens"
+            )
         try:
             response = await provider.invoke(
                 [
                     {"role": "system", "content": DOCUMENT_PROFILE_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": document_profile_prompt(
-                            title, abstract, section_titles, excerpt
-                        ),
-                    },
+                    {"role": "user", "content": prompt},
                 ],
                 [],
             )

@@ -74,6 +74,10 @@ export async function streamRun(
             if (line.startsWith('event:')) event = line.slice(6).trim()
             if (line.startsWith('data:')) data = line.slice(5).trim()
           }
+          if (event === 'text_delta') {
+            onEvent(event, JSON.parse(data), cursor)
+            continue
+          }
           if (id <= cursor) continue
           cursor = id
           onEvent(event, JSON.parse(data), id)

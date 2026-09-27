@@ -10,8 +10,21 @@ from app.models import RunEvent
 
 
 class EventStore:
+    """Durable run events plus an ephemeral realtime channel.
+
+    ``emit`` only writes and stages an event; ``publish_pending`` pushes staged
+    durable events to Redis. Callers must commit the transaction in between so a
+    rolled-back event is never delivered to the frontend. ``publish`` is for
+    transient events (``text_delta``) that are never persisted or replayed.
+    """
+
     def __init__(self, redis_url: str) -> None:
         self.redis = Redis.from_url(redis_url, decode_responses=True)
+        self._pending: list[RunEvent] = []
+
+    @staticmethod
+    def channel(run_id: str) -> str:
+        return f"agent-run:{run_id}"
 
     async def emit(
         self, db: AsyncSession, run_id: str, event_type: str, payload: dict[str, object]
@@ -27,18 +40,46 @@ class EventStore:
         )
         db.add(event)
         await db.flush()
+        self._pending.append(event)
+        return event
+
+    async def publish_pending(self) -> None:
+        pending = self._pending
+        self._pending = []
+        for event in pending:
+            await self._publish(event.run_id, event.event_type, event.payload, event.sequence)
+
+    def discard_pending(self) -> None:
+        self._pending = []
+
+    async def publish(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        sequence: int | None = None,
+    ) -> None:
+        await self._publish(run_id, event_type, payload, sequence)
+
+    async def _publish(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        sequence: int | None,
+    ) -> None:
         try:
             await self.redis.publish(
-                f"agent-run:{run_id}",
+                self.channel(run_id),
                 json.dumps(
-                    {"sequence": event.sequence, "type": event_type, "payload": payload},
+                    {"sequence": sequence, "type": event_type, "payload": payload},
                     ensure_ascii=False,
                     default=str,
                 ),
             )
         except Exception:
+            # Durable events are recoverable from the database on reconnect.
             pass
-        return event
 
     async def close(self) -> None:
         await self.redis.aclose()

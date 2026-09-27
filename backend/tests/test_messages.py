@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.agent.messages import (
+    TOOL_INCOMPLETE,
     TOOL_RESULT_PLACEHOLDER,
     clear_old_tool_results,
     sanitize_messages,
@@ -57,3 +58,40 @@ def test_clear_old_tool_results_keeps_recent_verbatim() -> None:
     tool_messages = [item for item in cleared if item.get("role") == "tool"]
     assert tool_messages[0]["content"] == TOOL_RESULT_PLACEHOLDER
     assert tool_messages[-1]["content"] == "r2"
+
+
+def test_clear_old_tool_results_stops_at_the_smallest_oldest_batch() -> None:
+    data = conversation()
+    first, changed = clear_old_tool_results(
+        data,
+        keep_recent=0,
+        within=lambda items: sum(
+            item.get("content") == TOOL_RESULT_PLACEHOLDER for item in items
+        ) >= 1,
+    )
+    assert changed
+    assert [item["content"] for item in first if item["role"] == "tool"] == [
+        TOOL_RESULT_PLACEHOLDER,
+        "r2",
+    ]
+    second, changed = clear_old_tool_results(
+        data,
+        keep_recent=0,
+        within=lambda items: sum(
+            item.get("content") == TOOL_RESULT_PLACEHOLDER for item in items
+        ) >= 2,
+    )
+    assert changed
+    assert [item["content"] for item in second if item["role"] == "tool"] == [
+        TOOL_RESULT_PLACEHOLDER,
+        TOOL_RESULT_PLACEHOLDER,
+    ]
+
+
+def test_clear_old_tool_results_skips_existing_placeholder_and_incomplete() -> None:
+    data = conversation()
+    data[2]["content"] = TOOL_RESULT_PLACEHOLDER
+    data[6]["content"] = TOOL_INCOMPLETE
+    result, changed = clear_old_tool_results(data, keep_recent=0)
+    assert not changed
+    assert result == data

@@ -36,12 +36,9 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     model_context_window: int = 1_048_576
     max_output_tokens: int = 32_768
-    context_safety_ratio: float = Field(default=0.95, gt=0.5, le=1.0)
-    context_trim_threshold: float = Field(default=0.6, gt=0.1, le=1.0)
-    context_summary_threshold: float = Field(default=0.75, gt=0.1, le=1.0)
+    context_safety_ratio: float = Field(default=0.6, gt=0.5, le=1.0)
     context_keep_recent_turns: int = Field(default=6, ge=1, le=50)
     context_keep_recent_tool_results: int = Field(default=4, ge=0, le=50)
-    history_recent_runs: int = Field(default=8, ge=1, le=50)
 
     siliconflow_base_url: str = "https://api.siliconflow.cn/v1"
     siliconflow_api_key: str = ""

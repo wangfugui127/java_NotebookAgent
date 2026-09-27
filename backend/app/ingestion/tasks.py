@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, select
 
@@ -28,8 +30,37 @@ from app.retrieval.milvus import MilvusStore
 from app.retrieval.neo4j_store import Neo4jStore
 
 logger = logging.getLogger(__name__)
-GRAPH_SECTION_CHUNK_LIMIT = 8
+GRAPH_BATCH_SIZE = 8
 GRAPH_SEGMENT_CHARS = 4000
+
+ExtractCallable = Callable[
+    [str, list[str]],
+    Awaitable[list[tuple[list[dict[str, Any]], list[dict[str, Any]]]]],
+]
+UpsertCallable = Callable[
+    [Chunk, list[dict[str, Any]], list[dict[str, Any]]], Awaitable[None]
+]
+
+
+async def extract_section_batches(
+    section_title: str,
+    section_chunks: list[Chunk],
+    *,
+    extract: ExtractCallable,
+    upsert: UpsertCallable,
+    batch_size: int = GRAPH_BATCH_SIZE,
+    segment_chars: int = GRAPH_SEGMENT_CHARS,
+) -> int:
+    """Run extraction for every chunk of a section, in bounded batches."""
+    calls = 0
+    for start in range(0, len(section_chunks), batch_size):
+        batch = section_chunks[start : start + batch_size]
+        segments = [chunk.content[:segment_chars] for chunk in batch]
+        extracted = await extract(section_title, segments)
+        calls += 1
+        for chunk, (entities, relations) in zip(batch, extracted, strict=True):
+            await upsert(chunk, entities, relations)
+    return calls
 
 
 def _section_for(
@@ -140,9 +171,9 @@ async def ingest_document_version(document_version_id: str) -> None:
                 profile = await build_document_profile(
                     title=document.title,
                     full_text=parsed.text,
-                    section_titles=[draft.title for draft, _ in sections],
                     provider=llm,
                     model_name=settings.deepseek_model,
+                    max_input_tokens=settings.effective_input_budget,
                 )
                 await db.execute(
                     delete(DocumentProfile).where(
@@ -311,30 +342,39 @@ async def build_graph_index(document_version_id: str) -> None:
                 if key not in grouped:
                     grouped[key] = []
                     order.append(key)
-                if len(grouped[key]) < GRAPH_SECTION_CHUNK_LIMIT:
-                    grouped[key].append(chunk)
+                grouped[key].append(chunk)
             for section_id in order:
                 section_chunks = grouped[section_id]
                 if not section_chunks:
                     continue
                 section_title = section_titles.get(section_id, "正文")
-                segments = [chunk.content[:GRAPH_SEGMENT_CHARS] for chunk in section_chunks]
-                extracted = await extract_section_graph(
-                    section_title, segments, graph_provider, settings.deepseek_model
-                )
-                for chunk, (entities, relations) in zip(
-                    section_chunks, extracted, strict=True
-                ):
+
+                async def upsert(
+                    chunk: Chunk,
+                    entities: list[dict[str, Any]],
+                    relations: list[dict[str, Any]],
+                    _section_id: str = section_id,
+                    _section_title: str = section_title,
+                ) -> None:
                     await graph.upsert_chunk(
                         document.notebook_id,
                         version.id,
                         document.id,
                         document.title,
                         chunk.id,
-                        {"id": section_id, "title": section_title},
+                        {"id": _section_id, "title": _section_title},
                         entities,
                         relations,
                     )
+
+                await extract_section_batches(
+                    section_title,
+                    section_chunks,
+                    extract=lambda title, segments: extract_section_graph(
+                        title, segments, graph_provider, settings.deepseek_model
+                    ),
+                    upsert=upsert,
+                )
             version.graph_status = "ready"
             await db.commit()
         except Exception as exc:

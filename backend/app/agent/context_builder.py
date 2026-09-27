@@ -30,6 +30,27 @@ def estimate_tokens(value: str) -> int:
     return max(1, cjk + math.ceil(other / 3.2))
 
 
+def message_entries(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Provider-visible shape of messages; drops internal-only keys like message_id."""
+    entries: list[dict[str, Any]] = []
+    for item in messages:
+        entry: dict[str, Any] = {
+            "role": item.get("role", "user"),
+            "content": item.get("content", ""),
+        }
+        if item.get("tool_calls"):
+            entry["tool_calls"] = item["tool_calls"]
+        if item.get("tool_call_id"):
+            entry["tool_call_id"] = item["tool_call_id"]
+        entries.append(entry)
+    return entries
+
+
+def messages_tokens(messages: list[dict[str, Any]]) -> int:
+    """Single source of truth for message token accounting (matches _base_layers)."""
+    return estimate_tokens(str(message_entries(messages)))
+
+
 def _page_bounds(payload: AttachmentPayload, start: int, end: int) -> tuple[int | None, int | None]:
     pages = [
         entry
@@ -111,29 +132,20 @@ class ContextBuilder:
         evidence: list[dict[str, Any]],
         skill_catalog: list[dict[str, Any]],
         tool_catalog: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         layers: dict[str, int] = {}
         system = ROOT_AGENT_SYSTEM_PROMPT
         layers["system_prompt"] = estimate_tokens(system)
-        recent: list[dict[str, Any]] = []
-        for item in history:
-            entry: dict[str, Any] = {
-                "role": item.get("role", "user"),
-                "content": item.get("content", ""),
-            }
-            if item.get("tool_calls"):
-                entry["tool_calls"] = item["tool_calls"]
-            if item.get("tool_call_id"):
-                entry["tool_call_id"] = item["tool_call_id"]
-            recent.append(entry)
-        history_text = str(recent)
-        layers["recent_turns"] = estimate_tokens(history_text)
+        recent = message_entries(history)
+        layers["recent_turns"] = messages_tokens(history)
         layers["conversation_summary"] = estimate_tokens(str(summary or {}))
         layers["agent_state"] = estimate_tokens(str(asdict(state)))
         layers["notebook_index"] = estimate_tokens(notebook_index)
         layers["evidence"] = estimate_tokens(str(evidence))
         layers["skill_catalog"] = estimate_tokens(str(skill_catalog))
         layers["tool_catalog"] = estimate_tokens(str(tool_catalog))
+        layers["tool_schemas"] = estimate_tokens(str(tool_schemas)) if tool_schemas else 0
         context_message = {
             "role": "system",
             "content": runtime_context_prompt(
@@ -147,6 +159,32 @@ class ContextBuilder:
         }
         return [{"role": "system", "content": system}, context_message, *recent], layers
 
+    def fixed_layer_tokens(
+        self,
+        envelope: QueryEnvelope,
+        *,
+        summary: dict[str, Any] | None,
+        state: AgentState,
+        notebook_index: str = "",
+        evidence: list[dict[str, Any]] | None = None,
+        skill_catalog: list[dict[str, Any]] | None = None,
+        tool_catalog: list[dict[str, Any]] | None = None,
+        tool_schemas: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Tokens consumed by everything except cross-run history and attachments."""
+        _, layers = self._base_layers(
+            envelope,
+            [],
+            summary,
+            state,
+            notebook_index,
+            evidence or [],
+            skill_catalog or [],
+            tool_catalog or [],
+            tool_schemas or [],
+        )
+        return sum(layers.values()) + estimate_tokens(envelope.query)
+
     def build_packets(
         self,
         envelope: QueryEnvelope,
@@ -158,10 +196,12 @@ class ContextBuilder:
         evidence: list[dict[str, Any]] | None = None,
         skill_catalog: list[dict[str, Any]] | None = None,
         tool_catalog: list[dict[str, Any]] | None = None,
+        tool_schemas: list[dict[str, Any]] | None = None,
     ) -> list[ContextPacket]:
         evidence = evidence or []
         skill_catalog = skill_catalog or []
         tool_catalog = tool_catalog or []
+        tool_schemas = tool_schemas or []
         budget = self.settings.effective_input_budget
         packing_budget = int(budget * 0.95)
         compression_omissions: list[dict[str, Any]] = []
@@ -175,6 +215,7 @@ class ContextBuilder:
             evidence,
             skill_catalog,
             tool_catalog,
+            tool_schemas,
         )
         query_tokens = estimate_tokens(envelope.query)
         base_tokens = sum(layers.values())

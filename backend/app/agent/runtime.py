@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict
 from typing import Any
@@ -8,10 +9,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.compactor import ContextCompactor
-from app.agent.context_builder import ContextBuilder, estimate_tokens
+from app.agent.compactor import ContextCompactor, ContextOverflowError
+from app.agent.context_builder import ContextBuilder, estimate_tokens, messages_tokens
 from app.agent.events import EventStore
 from app.agent.messages import sanitize_messages
+from app.agent.messages import turns as split_turns
+from app.agent.rag_router import LLMRagRouter
 from app.agent.router import EmbeddingRouterProvider, RouterProvider
 from app.agent.types import AgentState, AttachmentPayload, QueryEnvelope
 from app.core.config import Settings
@@ -48,6 +51,20 @@ from app.skills.catalog import SkillCatalog
 from app.tools.native import build_native_registry
 from app.tools.registry import ToolExecutionContext, ToolRegistry
 
+logger = logging.getLogger(__name__)
+
+ALWAYS_AVAILABLE_TOOLS = (
+    "load_skill",
+    "tool_search",
+    "read_mcp_resource",
+    "list_notebook_sources",
+    "search_notebook",
+    "get_notebook_items",
+    "search_papers",
+    "get_paper_details",
+)
+ROUTED_TOOL_COUNT = 10
+
 
 class AgentRuntime:
     def __init__(
@@ -60,6 +77,7 @@ class AgentRuntime:
     ) -> None:
         self.settings = settings
         self.provider = DeepSeekProvider(settings)
+        self.rag_router = LLMRagRouter(self.provider)
         self.openalex = OpenAlexProvider(settings)
         siliconflow = SiliconFlowProvider(settings)
         self.retrieval = RetrievalService(MilvusStore(settings), Neo4jStore(settings), siliconflow)
@@ -80,15 +98,18 @@ class AgentRuntime:
         await self.events.close()
 
     async def _message_history(
-        self, db: AsyncSession, conversation_id: str
+        self,
+        db: AsyncSession,
+        conversation_id: str,
+        exclude_message_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Full conversation history from the messages table (authoritative)."""
         messages = (
             (
                 await db.execute(
                     select(Message)
                     .where(Message.conversation_id == conversation_id)
-                    .order_by(Message.created_at.desc())
-                    .limit(40)
+                    .order_by(Message.created_at.asc(), Message.id.asc())
                 )
             )
             .scalars()
@@ -96,64 +117,9 @@ class AgentRuntime:
         )
         return [
             {"role": item.role, "content": item.content, "message_id": item.id}
-            for item in reversed(messages)
+            for item in messages
+            if item.role in {"user", "assistant"} and item.id != exclude_message_id
         ]
-
-    @staticmethod
-    def _cap_history(messages: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
-        """Keep the most recent provider-format messages within a token cap."""
-        cap = max(1_000, int(budget * 0.4))
-        kept: list[dict[str, Any]] = []
-        used = 0
-        for item in reversed(messages):
-            cost = estimate_tokens(str(item.get("content") or "")) + 32
-            if kept and used + cost > cap:
-                break
-            kept.append(item)
-            used += cost
-        return list(reversed(kept))
-
-    async def _history(
-        self,
-        db: AsyncSession,
-        conversation_id: str,
-        exclude_run_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Rebuild prior turns from saved LLM-format transcripts."""
-        statement = select(AgentRun.id).where(AgentRun.conversation_id == conversation_id)
-        if exclude_run_id:
-            statement = statement.where(AgentRun.id != exclude_run_id)
-        run_ids = (
-            (
-                await db.execute(
-                    statement.order_by(AgentRun.created_at.desc()).limit(
-                        self.settings.history_recent_runs
-                    )
-                )
-            )
-            .scalars()
-            .all()
-        )
-        if not run_ids:
-            return await self._message_history(db, conversation_id)
-        transcripts = (
-            (
-                await db.execute(
-                    select(RunTranscript).where(RunTranscript.run_id.in_(list(run_ids)))
-                )
-            )
-            .scalars()
-            .all()
-        )
-        by_run = {item.run_id: list(item.messages or []) for item in transcripts}
-        messages: list[dict[str, Any]] = []
-        for run_id in reversed(list(run_ids)):
-            messages.extend(
-                item for item in by_run.get(run_id, []) if item.get("role") != "system"
-            )
-        if not messages:
-            return await self._message_history(db, conversation_id)
-        return sanitize_messages(messages)
 
     async def _save_transcript(
         self,
@@ -299,6 +265,83 @@ class AgentRuntime:
         run.state = run.state | {"agent_state": asdict(state)}
         await db.flush()
 
+    async def _commit(self, db: AsyncSession) -> None:
+        """Commit, then publish staged durable events so nothing uncommitted leaks."""
+        try:
+            await db.commit()
+        except Exception:
+            self.events.discard_pending()
+            raise
+        await self.events.publish_pending()
+
+    @staticmethod
+    def _apply_summary_boundary(
+        history: list[dict[str, Any]],
+        stored_summary: dict[str, Any] | None,
+        *,
+        keep_recent_turns: int = 0,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Only inject a stored summary when its message boundary is present.
+
+        Otherwise the raw history already contains that text and adding the
+        summary again would duplicate it.
+        """
+        if not stored_summary:
+            return "", history
+        boundary = str(stored_summary.get("through_message_id") or "")
+        text = str(stored_summary.get("text") or "").strip()
+        if not boundary or not text:
+            return "", history
+        index = next(
+            (i for i, item in enumerate(history) if item.get("message_id") == boundary),
+            None,
+        )
+        if index is None:
+            return "", history
+        remaining = history[index + 1 :]
+        if keep_recent_turns and (
+            len(split_turns(remaining)) < keep_recent_turns
+            or not remaining
+            or remaining[0].get("role") != "user"
+        ):
+            return "", history
+        return text, remaining
+
+    def _plan_history(
+        self,
+        full_history: list[dict[str, Any]],
+        probe_text: str,
+        probe_remaining: list[dict[str, Any]],
+        budget: int,
+        reserve: int,
+        fixed_without: int,
+        fixed_with: int,
+    ) -> tuple[list[dict[str, Any]], str, int | None]:
+        """Budget-first history decision using the exact build_packets measurement.
+
+        Returns ``(history, summary_text, compact_budget)``; ``compact_budget``
+        is None when no further compaction is needed.
+        """
+        available_without = budget - reserve - fixed_without
+        if not full_history:
+            return full_history, "", None
+        if messages_tokens(full_history) <= available_without:
+            return full_history, "", None
+        if available_without <= 0:
+            raise ContextOverflowError(
+                "fixed context leaves no room for history: "
+                f"available={available_without}, history={messages_tokens(full_history)}"
+            )
+        avail_with = budget - reserve - fixed_with
+        if probe_text and avail_with > 0:
+            if messages_tokens(probe_remaining) <= avail_with:
+                return probe_remaining, probe_text, None
+            if probe_remaining:
+                return probe_remaining, probe_text, avail_with
+        # A stored summary that consumes the available space cannot help. Build
+        # a fresh, budgeted summary from the authoritative full message history.
+        return full_history, "", available_without
+
     async def _tool_context(
         self, db: AsyncSession, state: AgentState, allowed_documents: list[str] | None
     ) -> ToolExecutionContext:
@@ -313,6 +356,114 @@ class AgentRuntime:
             registry=self.registry,
             allowed_document_ids=allowed_documents,
         )
+
+    async def _initial_tool_context(
+        self, run: AgentRun, state: AgentState
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Expose core and loaded-Skill tools, plus ten distinct routed tools."""
+        selected = [
+            name
+            for name in dict.fromkeys(
+                [*ALWAYS_AVAILABLE_TOOLS, *(state.active_tool_allowlist or [])]
+            )
+            if name in self.registry.definitions
+        ]
+        candidate_names = run.state.get("candidate_names")
+        if candidate_names is None:
+            selected_set = set(selected)
+            remaining = [
+                item for item in self.registry.summaries() if item.name not in selected_set
+            ]
+            ranked = (
+                await self.router.select_tools(run.query, remaining, ROUTED_TOOL_COUNT)
+                if remaining
+                else []
+            )
+            remaining_names = [item.name for item in remaining]
+            remaining_set = set(remaining_names)
+            candidate_names = list(
+                dict.fromkeys(name for name in ranked if name in remaining_set)
+            )
+            candidate_names.extend(
+                name for name in remaining_names if name not in candidate_names
+            )
+            candidate_names = candidate_names[: min(ROUTED_TOOL_COUNT, len(remaining))]
+        selected = [
+            name
+            for name in dict.fromkeys([*selected, *candidate_names])
+            if name in self.registry.definitions
+        ]
+        catalog = [
+            asdict(self.registry.definitions[name].summary()) for name in selected
+        ]
+        return selected, catalog
+
+    @staticmethod
+    def _sync_tool_catalog(
+        messages: list[dict[str, Any]], catalog: list[dict[str, Any]]
+    ) -> None:
+        marker = "\n可搜索工具目录: "
+        for message in messages:
+            content = message.get("content")
+            if (
+                message.get("role") == "system"
+                and isinstance(content, str)
+                and content.startswith("会话摘要:")
+                and marker in content
+            ):
+                message["content"] = f"{content.rsplit(marker, 1)[0]}{marker}{catalog}"
+                return
+
+    async def _initial_rag_evidence(
+        self,
+        db: AsyncSession,
+        run: AgentRun,
+        state: AgentState,
+        allowed_documents: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        if run.state.get("pending_batch"):
+            return []
+        if await self.rag_router.route(run.query) != "rag":
+            return []
+        try:
+            result = await self.retrieval.search(
+                db,
+                notebook_id=run.notebook_id,
+                query=run.query,
+                document_ids=allowed_documents,
+                mode="auto",
+                top_k=8,
+            )
+        except Exception:
+            logger.exception("Initial Notebook RAG search failed for run %s", run.id)
+            return []
+        state.graph_degraded = bool(result.get("graph_degraded"))
+        observation = {"ok": True, "content": result}
+        await self._persist_observation_evidence(
+            db, run, state, "search_notebook", observation
+        )
+        return list(result.get("items") or [])
+
+    async def _compact_working_messages(
+        self, run: AgentRun, messages: list[dict[str, Any]], schema_tokens: int = 0
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        budget = self.settings.effective_input_budget - schema_tokens
+        if budget <= 0:
+            raise ContextOverflowError("上下文超限：工具 schema 已占满输入预算")
+        over_budget = messages_tokens(messages) > budget
+        try:
+            compacted, omissions, _ = await self.compactor.compact(
+                messages,
+                tool_cleanup_done=bool(run.state.get("tool_cleanup_done")),
+                budget=budget,
+            )
+        except ContextOverflowError as exc:
+            if schema_tokens:
+                raise ContextOverflowError(f"上下文超限：{exc}") from exc
+            raise
+        if over_budget and not run.state.get("tool_cleanup_done"):
+            run.state = run.state | {"tool_cleanup_done": True}
+        return compacted, omissions
 
     async def _persist_observation_evidence(
         self,
@@ -516,8 +667,7 @@ class AgentRuntime:
                 name = str(tool.get("name") or "")
                 if name in self.registry.definitions and name not in discovered:
                     discovered.append(name)
-            # tool_search 的命中必须优先进入下一轮 schema；否则初始候选已满 12 个时，
-            # 简单 append 会在后续截断中把刚发现的工具再次丢掉。
+            # 下一轮同步工具目录和 schema 时保留新发现的工具。
             if discovered:
                 candidate_names[:] = discovered + [
                     name for name in candidate_names if name not in discovered
@@ -599,7 +749,7 @@ class AgentRuntime:
                         "reason": reason,
                     },
                 )
-                await db.commit()
+                await self._commit(db)
                 return True
             result = await self.registry.dispatch(entry["name"], entry["arguments"], context)
             await self._finish_batch_call(
@@ -617,9 +767,7 @@ class AgentRuntime:
         candidate_names: list[str] | None = None,
     ) -> str | None:
         if candidate_names is None:
-            candidate_names = await self.router.select_tools(
-                run.query, self.registry.summaries(), 12
-            )
+            candidate_names, _ = await self._initial_tool_context(run, state)
         context = await self._tool_context(db, state, allowed_documents)
         pending = run.state.get("pending_batch")
         if pending:
@@ -665,14 +813,32 @@ class AgentRuntime:
                 start_index=index + 1,
             ):
                 return None
-            await db.commit()
+            await self._commit(db)
 
         for round_no in range(state.round_no, 10):
             state.round_no = round_no + 1
             if run.status == RunStatus.cancelled:
                 state.cancelled = True
                 return None
-            messages, omissions, compact_summary = await self.compactor.compact(messages)
+            candidate_names = [
+                name
+                for name in dict.fromkeys(
+                    [
+                        *ALWAYS_AVAILABLE_TOOLS,
+                        *(state.active_tool_allowlist or []),
+                        *candidate_names,
+                    ]
+                )
+                if name in self.registry.definitions
+            ]
+            tool_catalog = [
+                asdict(self.registry.definitions[name].summary()) for name in candidate_names
+            ]
+            self._sync_tool_catalog(messages, tool_catalog)
+            schemas = self.registry.schemas(candidate_names)
+            messages, omissions = await self._compact_working_messages(
+                run, messages, estimate_tokens(str(schemas))
+            )
             if omissions:
                 run.state = run.state | {"last_rebox_omissions": omissions}
                 await self._checkpoint(db, run, f"compacted_round_{state.round_no}", state)
@@ -682,34 +848,15 @@ class AgentRuntime:
                     "context_compacted",
                     {"round": state.round_no, "omissions": omissions},
                 )
-            if compact_summary:
-                await self._persist_summary(
-                    db,
-                    run.conversation_id,
-                    {
-                        "text": compact_summary,
-                        "through_message_id": f"{run.id}:{state.round_no}",
-                    },
-                )
-            if state.active_tool_allowlist is not None:
-                harness = {"load_skill", "tool_search", "read_mcp_resource"}
-                candidate_names = [
-                    name
-                    for name in candidate_names
-                    if name in set(state.active_tool_allowlist) | harness
-                ]
-            candidate_names = list(dict.fromkeys(candidate_names))[:12]
-            schemas = self.registry.schemas(candidate_names)
 
             async def on_delta(delta: str) -> None:
-                await self.events.emit(db, run.id, "text_delta", {"delta": delta})
-                await db.commit()
+                await self.events.publish(run.id, "text_delta", {"delta": delta})
 
             messages = sanitize_messages(messages)
             response = await self.provider.invoke(messages, schemas, on_delta)
             if not response.tool_calls:
                 await self._save_transcript(db, run, messages, response.content)
-                await db.commit()
+                await self._commit(db)
                 return response.content
             messages.append(
                 {
@@ -765,7 +912,7 @@ class AgentRuntime:
                 return None
             await self._checkpoint(db, run, f"round_{state.round_no}", state)
             await self._save_transcript(db, run, messages)
-            await db.commit()
+            await self._commit(db)
         raise RuntimeError("maximum agent rounds exceeded")
 
     async def _reduce_window_results(
@@ -835,27 +982,99 @@ class AgentRuntime:
             },
         )
         await self.events.emit(db, run.id, "run_started", {})
-        await db.commit()
+        await self._commit(db)
         try:
-            history = await self._history(db, run.conversation_id, run.id)
-            summary = await self._conversation_summary(db, run.conversation_id)
+            input_message_id = str(run.state.get("input_message_id") or "") or None
+            full_history = await self._message_history(db, run.conversation_id, input_message_id)
+            stored_summary = await self._conversation_summary(db, run.conversation_id)
+            probe_text, probe_remaining = self._apply_summary_boundary(
+                full_history,
+                stored_summary,
+                keep_recent_turns=max(6, self.settings.context_keep_recent_turns),
+            )
             allowed_documents = await self._allowed_documents(db, run)
             attachments = await self._attachments(db, run)
             envelope = QueryEnvelope(query=run.query, attachments=attachments)
-            packets = self.context_builder.build_packets(
-                envelope,
-                history=history,
-                summary=summary,
-                state=state,
-                notebook_index="当前 Notebook 的可用资料由 list_notebook_sources 查询。",
-                skill_catalog=self.skills.summaries(),
-                tool_catalog=[asdict(item) for item in self.registry.summaries()],
-            )
-            await self._persist_summary(
-                db,
-                run.conversation_id,
-                next((item.summary_update for item in packets if item.summary_update), None),
-            )
+            notebook_index = "当前 Notebook 的可用资料由 list_notebook_sources 查询。"
+            skill_catalog = self.skills.summaries()
+            candidate_names, tool_catalog = await self._initial_tool_context(run, state)
+            tool_schemas = self.registry.schemas(candidate_names)
+            evidence = await self._initial_rag_evidence(db, run, state, allowed_documents)
+
+            def fixed_tokens(summary_text: str) -> int:
+                payload = {"text": summary_text} if summary_text else None
+                return self.context_builder.fixed_layer_tokens(
+                    envelope,
+                    summary=payload,
+                    state=state,
+                    notebook_index=notebook_index,
+                    evidence=evidence,
+                    skill_catalog=skill_catalog,
+                    tool_catalog=tool_catalog,
+                    tool_schemas=tool_schemas,
+                )
+
+            # Match ContextBuilder's packing limit before it decides on windowing.
+            budget = int(self.settings.effective_input_budget * 0.95)
+            reserve = int(budget * 0.25) if attachments else 512
+            fixed_without = fixed_tokens("")
+            fixed_with = fixed_tokens(probe_text) if probe_text else fixed_without
+            if fixed_without - estimate_tokens(envelope.query) >= budget:
+                raise ContextOverflowError("上下文超限：固定内容和工具 schema 已占满输入预算")
+            if evidence and fixed_without >= budget:
+                raise ContextOverflowError("上下文超限：全部 RAG 片段和固定内容已超过输入预算")
+            try:
+                history, summary_text, compact_budget = self._plan_history(
+                    full_history,
+                    probe_text,
+                    probe_remaining,
+                    budget,
+                    reserve,
+                    fixed_without,
+                    fixed_with,
+                )
+            except ContextOverflowError as exc:
+                if evidence or tool_schemas:
+                    raise ContextOverflowError(f"上下文超限：{exc}") from exc
+                raise
+            # Compress cross-run history BEFORE build_packets decides on windowing.
+            if compact_budget is not None:
+                try:
+                    history, new_summary, boundary = await self.compactor.compact_history(
+                        history,
+                        compact_budget,
+                        previous_summary=summary_text,
+                        summary_overhead=lambda text: fixed_tokens(text) - fixed_without,
+                    )
+                except ContextOverflowError as exc:
+                    if evidence or tool_schemas:
+                        raise ContextOverflowError(f"上下文超限：{exc}") from exc
+                    raise
+                summary_text = new_summary or ""
+                if new_summary and boundary:
+                    await self._persist_summary(
+                        db,
+                        run.conversation_id,
+                        {"text": new_summary, "through_message_id": boundary},
+                    )
+
+            summary_payload = {"text": summary_text} if summary_text else None
+            try:
+                packets = self.context_builder.build_packets(
+                    envelope,
+                    history=history,
+                    summary=summary_payload,
+                    state=state,
+                    notebook_index=notebook_index,
+                    evidence=evidence,
+                    skill_catalog=skill_catalog,
+                    tool_catalog=tool_catalog,
+                    tool_schemas=tool_schemas,
+                )
+            except ValueError as exc:
+                if (evidence or tool_schemas) and "context layers leave no room" in str(exc):
+                    raise ContextOverflowError(f"上下文超限：{exc}") from exc
+                raise
             await self._attach_packet_evidence(db, run, packets, attachments, state)
             run.state = run.state | {
                 "context_manifests": [asdict(item.manifest) for item in packets]
@@ -867,7 +1086,7 @@ class AgentRuntime:
                 "context_manifest",
                 {"mode": packets[0].manifest.mode, "windows": len(packets)},
             )
-            await db.commit()
+            await self._commit(db)
 
             if len(packets) == 1:
                 answer = await self._tool_loop(
@@ -876,7 +1095,7 @@ class AgentRuntime:
                     state,
                     packets[0].messages,
                     allowed_documents,
-                    run.state.get("candidate_names"),
+                    candidate_names,
                 )
             else:
                 window_results: list[dict[str, Any]] = []
@@ -894,7 +1113,7 @@ class AgentRuntime:
                         "attachment_window_completed",
                         {"index": index, "total": len(packets)},
                     )
-                    await db.commit()
+                    await self._commit(db)
                 window_results = await self._reduce_window_results(run.query, window_results)
                 aggregate_messages = [
                     packets[0].messages[0],
@@ -904,7 +1123,7 @@ class AgentRuntime:
                     },
                 ]
                 answer = await self._tool_loop(
-                    db, run, state, aggregate_messages, allowed_documents
+                    db, run, state, aggregate_messages, allowed_documents, candidate_names
                 )
             if answer is None:
                 return
@@ -972,10 +1191,11 @@ class AgentRuntime:
                     ],
                 },
             )
-            await db.commit()
+            await self._commit(db)
         except Exception as exc:
+            self.events.discard_pending()
             run.status = RunStatus.failed
             run.error_message = str(exc)
             await self.events.emit(db, run.id, "run_failed", {"message": str(exc)})
-            await db.commit()
+            await self._commit(db)
             raise

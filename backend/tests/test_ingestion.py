@@ -100,3 +100,35 @@ def test_blocks_for_range_selects_overlapping_blocks() -> None:
     selected = blocks_for_range(blocks, 0, 4)
     assert selected
     assert all(block.char_start < 4 for block in selected)
+
+
+def test_section_detection_keeps_numbered_headings() -> None:
+    text = (
+        "# Abstract\n摘要内容。\n\n"
+        "1 Introduction\n引言内容。\n\n"
+        "2 Related Work\n相关工作内容。\n\n"
+        "3 Method\n方法内容。\n\n"
+        "4 Experiments\n实验内容。\n"
+    )
+    parsed = ParsedDocument(text=text, pages=[ParsedPage(1, 0, len(text), text)])
+    sections = detect_sections(parsed)
+    titles = [item.title for item in sections]
+    assert "Introduction" in titles
+    assert "Method" in titles
+    assert "Experiments" in titles
+    abstract = next(item for item in sections if item.title == "Abstract")
+    assert abstract.char_end < len(text)
+
+
+def test_section_detection_keeps_letter_numbered_headings() -> None:
+    text = "1 Introduction\n正文。\n\nA Appendix\n附录内容。\n"
+    parsed = ParsedDocument(text=text, pages=[ParsedPage(1, 0, len(text), text)])
+    titles = [item.title for item in detect_sections(parsed)]
+    assert "Appendix" in titles
+
+
+def test_section_detection_rejects_numeric_data_lines() -> None:
+    text = "1 Introduction\n正文。\n\n10.09 29.42 12.82 33.09 LightGBM 11.86\n更多正文。\n"
+    parsed = ParsedDocument(text=text, pages=[ParsedPage(1, 0, len(text), text)])
+    titles = [item.title for item in detect_sections(parsed)]
+    assert titles == ["Introduction"]

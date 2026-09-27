@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 TOOL_RESULT_PLACEHOLDER = '{"truncated":true,"note":"工具已执行，结果原文在数据库"}'
@@ -100,22 +101,24 @@ def trim_history_by_turns(
 
 
 def clear_old_tool_results(
-    messages: list[dict[str, Any]], keep_recent: int
+    messages: list[dict[str, Any]],
+    keep_recent: int,
+    *,
+    within: Callable[[list[dict[str, Any]]], bool] | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Replace the content of older tool messages; keep the newest verbatim."""
+    """Clear the smallest oldest-first batch that satisfies ``within``."""
     tool_indexes = [index for index, item in enumerate(messages) if is_tool(item)]
-    if keep_recent <= 0:
-        stale = set(tool_indexes)
-    else:
-        stale = set(tool_indexes[:-keep_recent])
-    if not stale:
-        return list(messages), False
+    protected = set(tool_indexes[-keep_recent:]) if keep_recent > 0 else set()
     changed = False
-    output: list[dict[str, Any]] = []
-    for index, item in enumerate(messages):
-        if index in stale and is_tool(item) and item.get("content") != TOOL_RESULT_PLACEHOLDER:
-            output.append({**item, "content": TOOL_RESULT_PLACEHOLDER})
-            changed = True
-        else:
-            output.append(item)
+    output = list(messages)
+    for index in tool_indexes:
+        if index in protected or output[index].get("content") in {
+            TOOL_RESULT_PLACEHOLDER,
+            TOOL_INCOMPLETE,
+        }:
+            continue
+        output[index] = {**output[index], "content": TOOL_RESULT_PLACEHOLDER}
+        changed = True
+        if within is not None and within(output):
+            break
     return output, changed
