@@ -1,0 +1,104 @@
+spring:
+  application:
+    name: NotebookAgent
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:notebookagent}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+    username: ${MYSQL_USER:notebookagent}
+    password: ${MYSQL_PASSWORD:notebookagent}
+    hikari:
+      pool-name: notebookagent-pool
+      maximum-pool-size: 12
+      connection-timeout: 30000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        format_sql: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    fail-on-missing-locations: true
+  data:
+    redis:
+      repositories:
+        enabled: false
+      url: ${REDIS_URL:redis://localhost:6379/0}
+  jackson:
+    property-naming-strategy: SNAKE_CASE
+    serialization:
+      write-dates-as-timestamps: false
+    deserialization:
+      fail-on-unknown-properties: false
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
+  mvc:
+    async:
+      request-timeout: -1
+
+server:
+  port: 8001
+  error:
+    include-message: always
+    include-stacktrace: never
+
+app:
+  name: ${APP_NAME:NotebookAgent}
+  env: ${APP_ENV:development}
+  secret-key: ${APP_SECRET_KEY:development-only-change-me-at-least-32-bytes}
+  access-token-minutes: ${ACCESS_TOKEN_MINUTES:30}
+  refresh-token-days: ${REFRESH_TOKEN_DAYS:30}
+
+  milvus:
+    uri: ${MILVUS_URI:http://localhost:19530}
+    collection: ${MILVUS_COLLECTION:document_chunks_v3}
+    document-collection: ${MILVUS_DOCUMENT_COLLECTION:notebook_documents_v1}
+  neo4j:
+    uri: ${NEO4J_URI:bolt://localhost:7687}
+    user: ${NEO4J_USER:neo4j}
+    password: ${NEO4J_PASSWORD:notebookagent-neo4j}
+
+  deepseek:
+    base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+    model: ${DEEPSEEK_MODEL:deepseek-flash}
+    api-key: ${DEEPSEEK_API_KEY:}
+  siliconflow:
+    base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
+    api-key: ${SILICONFLOW_API_KEY:}
+    embedding-model: ${EMBEDDING_MODEL:BAAI/bge-m3}
+    embedding-dim: ${EMBEDDING_DIM:1024}
+    rerank-model: ${RERANK_MODEL:BAAI/bge-reranker-v2-m3}
+  openalex:
+    mailto: ${OPENALEX_MAILTO:}
+
+  model-context-window: ${MODEL_CONTEXT_WINDOW:1048576}
+  max-output-tokens: ${MAX_OUTPUT_TOKENS:32768}
+  context-safety-ratio: ${CONTEXT_SAFETY_RATIO:0.6}
+  context-keep-recent-turns: ${CONTEXT_KEEP_RECENT_TURNS:6}
+  context-keep-recent-tool-results: ${CONTEXT_KEEP_RECENT_TOOL_RESULTS:4}
+
+  upload-dir: ${UPLOAD_DIR:./uploads}
+  mcp-servers-config: ${MCP_SERVERS_CONFIG:../config/mcp_servers.yaml}
+  mcp-expose-config: ${MCP_EXPOSE_CONFIG:../config/mcp_expose.yaml}
+  skills-config: ${SKILLS_CONFIG:../config/skills.yaml}
+  eval-golden-path: ${EVAL_GOLDEN_PATH:../config/eval_golden.json}
+
+  queue:
+    key-prefix: ${QUEUE_KEY_PREFIX:notebookagent}
+    stream: tasks
+    consumer-group: workers
+    visibility-timeout-seconds: 120
+    lease-seconds: 90
+    dispatcher-interval-ms: 1000
+    poll-block-ms: 2000
+
+logging:
+  level:
+    root: INFO
+    com.wangfugui.notebookagent: INFO

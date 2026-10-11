@@ -8,7 +8,15 @@ servers:
       - semantic-scholar-mcp==0.4.0
       - --with
       - mcp<2
-      - semantic-scholar-mcp
+      - python
+      - -c
+      - |
+        import contextlib
+        import sys
+        # Dependencies may print import warnings; stdout belongs to MCP JSON-RPC.
+        with contextlib.redirect_stdout(sys.stderr):
+            from semantic_scholar_mcp import main
+        main()
     env:
       SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY}
     allowed_tools:
@@ -45,4 +53,3 @@ servers:
 #     env:
 #       API_KEY: ${SOME_API_KEY}
 #     default_risk: write
-

@@ -1,0 +1,111 @@
+{
+  "url": "http://127.0.0.1:13000",
+  "started_at": "2026-10-11 10:53:53",
+  "checks": [
+    {
+      "name": "frontend_and_database_redis_health",
+      "result": "passed",
+      "details": true
+    },
+    {
+      "name": "registration_authentication",
+      "result": "passed",
+      "details": true
+    },
+    {
+      "name": "real_embedding_and_milvus_ingestion",
+      "result": "passed",
+      "details": {
+        "status": "ready",
+        "version_id": "96fea9f8-bd25-4d3f-bfb1-d5d6c790e71f"
+      }
+    },
+    {
+      "name": "real_retrieval_chat_citations_and_sse",
+      "result": "passed",
+      "details": {
+        "run_id": "a61b9d27-c977-483c-a3a4-30ea39ed1a28",
+        "citation_count": 3,
+        "durable_event_count": 5,
+        "independent_connection_closed_at": [
+          1
+        ]
+      }
+    },
+    {
+      "name": "sse_database_replay",
+      "result": "passed",
+      "details": [
+        5
+      ]
+    },
+    {
+      "name": "context_manifest",
+      "result": "passed",
+      "details": {
+        "count": 1,
+        "mode": "single"
+      }
+    },
+    {
+      "name": "full_attachment_chat_and_citations",
+      "result": "passed",
+      "details": {
+        "run_id": "a8428af1-3969-4956-b774-077ff58ffd96",
+        "citations": 4
+      }
+    },
+    {
+      "name": "real_graph_index_and_query",
+      "result": "passed",
+      "details": {
+        "graph_status": "ready",
+        "experiments": 3
+      }
+    },
+    {
+      "name": "real_evaluation",
+      "result": "passed",
+      "details": {
+        "id": "7a837a98-b5a9-4231-9708-30f5ad1a8102",
+        "completed_cases": 1,
+        "passed_cases": 1
+      }
+    },
+    {
+      "name": "real_approval_rejected",
+      "result": "passed",
+      "details": {
+        "run_id": "54a8d023-dda4-4e6c-8fe7-0323c3290a35",
+        "source_present": true
+      }
+    },
+    {
+      "name": "real_approval_approved",
+      "result": "passed",
+      "details": {
+        "run_id": "16c57cb9-c9f4-4790-9c83-ae42f7ca1958",
+        "source_present": false
+      }
+    },
+    {
+      "name": "source_deletion",
+      "result": "passed",
+      "details": true
+    },
+    {
+      "name": "acceptance_complete",
+      "result": "passed",
+      "details": {
+        "checks": 13
+      }
+    }
+  ],
+  "notebook_id": "4007acbd-8e62-49c0-82eb-e404c280d03d",
+  "source": {
+    "document_id": "cde511c3-005a-46a3-b18e-2c559fb0916c",
+    "job_id": "e646937f-1e30-4344-875c-4a37931a7894",
+    "version_id": "96fea9f8-bd25-4d3f-bfb1-d5d6c790e71f"
+  },
+  "finished_at": "2026-10-11 10:55:21"
+}

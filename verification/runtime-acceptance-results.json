@@ -1,0 +1,9 @@
+{
+  "external_stdio_tools": 12,
+  "external_stdio_errors": {},
+  "skills": [
+    "literature-review"
+  ],
+  "exposed_http_tools": 5,
+  "authenticated_http_tool_call": "passed"
+}

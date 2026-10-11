@@ -13,10 +13,10 @@ logs:
 	docker compose --profile core --profile graph logs -f api worker
 
 test:
-	cd backend && uv run pytest
+	cd backend && mvn -q test
 
 lint:
-	cd backend && uv run ruff check .
+	cd backend && mvn -q -DskipTests compile
 
 frontend-build:
 	cd frontend && npm run build

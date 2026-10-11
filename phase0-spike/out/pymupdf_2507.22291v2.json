@@ -1,0 +1,252 @@
+{
+  "name": "2507.22291v2.pdf",
+  "pages": 63,
+  "text_len": 185097,
+  "block_count": 1248,
+  "body_font_size": 11.0,
+  "heading_count": 88,
+  "headings": [
+    {
+      "page": 1,
+      "level": "h1",
+      "size": 21.0,
+      "text": "An embedding field"
+    },
+    {
+      "page": 1,
+      "level": "h1",
+      "size": 21.0,
+      "text": "model for accurate and efficient global"
+    },
+    {
+      "page": 1,
+      "level": "h1",
+      "size": 21.0,
+      "text": "mapping from sparse label data"
+    },
+    {
+      "page": 1,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Introduction"
+    },
+    {
+      "page": 1,
+      "level": "h3",
+      "size": 13.0,
+      "text": "From sparse labels to maps"
+    },
+    {
+      "page": 1,
+      "level": "h1",
+      "size": 20.0,
+      "text": "arXiv:2507.22291v2  [cs.CV]  8 Sep 2025"
+    },
+    {
+      "page": 3,
+      "level": "h4",
+      "size": 11.0,
+      "text": "A natural approach to better leveraging sparse"
+    },
+    {
+      "page": 3,
+      "level": "h3",
+      "size": 13.0,
+      "text": "AlphaEarth Foundations"
+    },
+    {
+      "page": 4,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Evaluation in realistic data-scarce sce-"
+    },
+    {
+      "page": 4,
+      "level": "h3",
+      "size": 13.0,
+      "text": "narios"
+    },
+    {
+      "page": 6,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Thematic mapping"
+    },
+    {
+      "page": 9,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Estimating biophysical variables"
+    },
+    {
+      "page": 9,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Change detection"
+    },
+    {
+      "page": 9,
+      "level": "h4",
+      "size": 11.0,
+      "text": "11 balanced accuracy (BA)"
+    },
+    {
+      "page": 9,
+      "level": "h4",
+      "size": 11.0,
+      "text": "67 BA (kNN, k=3) on the"
+    },
+    {
+      "page": 9,
+      "level": "h4",
+      "size": 11.0,
+      "text": "33 BA"
+    },
+    {
+      "page": 9,
+      "level": "h4",
+      "size": 11.0,
+      "text": "14 BA and"
+    },
+    {
+      "page": 9,
+      "level": "h4",
+      "size": 11.0,
+      "text": "08 BA compared to 67"
+    },
+    {
+      "page": 9,
+      "level": "h4",
+      "size": 11.0,
+      "text": "28 BA"
+    },
+    {
+      "page": 9,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Scaling source data quantity and type"
+    },
+    {
+      "page": 11,
+      "level": "h4",
+      "size": 11.0,
+      "text": "A noteworthy outlier is US"
+    },
+    {
+      "page": 11,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Global embeddings dataset"
+    },
+    {
+      "page": 11,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Conclusions"
+    },
+    {
+      "page": 11,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Acknowledgements"
+    },
+    {
+      "page": 12,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Author contributions"
+    },
+    {
+      "page": 12,
+      "level": "h3",
+      "size": 13.0,
+      "text": "Data and Materials Availability"
+    },
+    {
+      "page": 12,
+      "level": "h3",
+      "size": 13.0,
+      "text": "References"
+    },
+    {
+      "page": 13,
+      "level": "h4",
+      "size": 11.0,
+      "text": "G. Blasch. Ethiopian crop type 2020 (EthCT2020)"
+    },
+    {
+      "page": 13,
+      "level": "h4",
+      "size": 11.0,
+      "text": "M. Andu-"
+    },
+    {
+      "page": 13,
+      "level": "h4",
+      "size": 11.0,
+      "text": "M. Burke, D. Lobell, and S. Ermon. Satmae: Pre-"
+    },
+    {
+      "page": 13,
+      "level": "h4",
+      "size": 11.0,
+      "text": "A large-scale hierarchical"
+    },
+    {
+      "page": 14,
+      "level": "h4",
+      "size": 11.0,
+      "text": "J. Armston, S. P. Healey, J. M. Bru-"
+    },
+    {
+      "page": 14,
+      "level": "h4",
+      "size": 11.0,
+      "text": "T. Loveland, R. Stanimirova, P. Arevalo, E. Bul-"
+    },
+    {
+      "page": 14,
+      "level": "h4",
+      "size": 11.0,
+      "text": "D. Thau, S. V. Stehman, S. J. Goetz, T. R. Love-"
+    },
+    {
+      "page": 15,
+      "level": "h4",
+      "size": 11.0,
+      "text": "E. Fancher, T. Lee, K. Murphy, D. Duffy, M. Lit-"
+    },
+    {
+      "page": 15,
+      "level": "h4",
+      "size": 11.0,
+      "text": "N. Pastick, P. Doucette, R. Fleckenstein, D. Lu-"
+    },
+    {
+      "page": 15,
+      "level": "h4",
+      "size": 11.0,
+      "text": "J. Jakubik, S. Roy, C. Phillips, P. Fraccaro, D. God-"
+    },
+    {
+      "page": 15,
+      "level": "h4",
+      "size": 11.0,
+      "text": "K. Klemmer, E. Rolf, C. Robinson, L. Mackey, and"
+    },
+    {
+      "page": 15,
+      "level": "h4",
+      "size": 11.0,
+      "text": "H. Kerner, B. Lütjens, J. Irvin, D. Dao, H. Alemo-"
+    },
+    {
+      "page": 15,
+      "level": "h4",
+      "size": 11.0,
+      "text": "A review"
+    }
+  ],
+  "table_count": 0,
+  "tables": []
+}

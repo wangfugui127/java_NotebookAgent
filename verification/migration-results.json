@@ -1,0 +1,24 @@
+{
+  "source": "F:\\Project Practice\\notebook\\java_notebook",
+  "destination": "F:\\Project Practice\\java项目\\java_notebook",
+  "source_absent": true,
+  "verified_files": 247,
+  "changed_or_missing": [],
+  "extra_files": [],
+  "restarted_from_new_directory": true,
+  "frontend_http": 200,
+  "health_status": "ok",
+  "container_health": {
+    "api": "healthy",
+    "worker": "healthy",
+    "mysql": "healthy",
+    "redis": "healthy",
+    "milvus": "healthy",
+    "neo4j": "healthy"
+  },
+  "preserved_completed_runs": 4,
+  "preserved_eval_passed_cases": 1,
+  "approved_deletion_preserved": true,
+  "mall_frontend_http": 200,
+  "finished_at": "2026-10-10 17:40:53"
+}

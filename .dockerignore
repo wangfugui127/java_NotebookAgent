@@ -11,5 +11,8 @@
 **/.ruff_cache
 **/*.pyc
 **/*.pyo
+**/target
 **/*.tsbuildinfo
 *.log
+verification/runtime
+verification/protected-baseline.json

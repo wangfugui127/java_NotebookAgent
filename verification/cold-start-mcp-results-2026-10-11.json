@@ -1,0 +1,8 @@
+{
+  "fresh_container_mcp_catalog": "passed",
+  "agent_status": "completed",
+  "candidate_tools": 18,
+  "external_candidates": 7,
+  "embedding_router_with_live_mcp_catalog": "passed",
+  "run_id": "fc5f3f8b-59fe-4407-ad5a-5cccee815909"
+}

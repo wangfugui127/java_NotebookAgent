@@ -1,1 +1,0 @@
-"""Golden-sample evaluation package."""
