@@ -110,6 +110,33 @@ class BackendIntegrationTest {
     SourceService.Created source(Fixture f) { return sources.createSource(f.notebook().getId(),"sample.md","text/markdown", "# 测试\n\n准确结论：样本库存为 10。".getBytes(java.nio.charset.StandardCharsets.UTF_8),".md"); }
     MockedConstruction<SiliconFlowProvider> embeddings() { return mockConstruction(SiliconFlowProvider.class, (m,c) -> when(m.embed(anyList())).thenAnswer(a -> ((List<?>)a.getArgument(0)).stream().map(x -> new float[8]).toList())); }
 
+    @Test void dockerBrowserOriginsCanLoginAndUntrustedOriginsAreRejected() throws Exception {
+        Fixture f = fixture();
+        String credentials = Json.write(Map.of("email", f.user().getEmail(), "password", "password123"));
+        for (String origin : List.of("http://127.0.0.1:13000", "http://localhost:13000")) {
+            mvc.perform(options("/api/v1/auth/login")
+                            .header("Origin", origin)
+                            .header("Access-Control-Request-Method", "POST")
+                            .header("Access-Control-Request-Headers", "content-type"))
+                    .andExpect(status().isOk())
+                    .andExpect(header().string("Access-Control-Allow-Origin", origin));
+            String login = mvc.perform(post("/api/v1/auth/login").header("Origin", origin)
+                            .contentType("application/json").content(credentials))
+                    .andExpect(status().isOk())
+                    .andExpect(header().string("Access-Control-Allow-Origin", origin))
+                    .andExpect(jsonPath("$.access_token").isString())
+                    .andReturn().getResponse().getContentAsString();
+            mvc.perform(get("/api/v1/notebooks").header("Origin", origin)
+                            .header("Authorization", "Bearer " + Json.readMap(login).get("access_token")))
+                    .andExpect(status().isOk())
+                    .andExpect(header().string("Access-Control-Allow-Origin", origin));
+        }
+        mvc.perform(post("/api/v1/auth/login").header("Origin", "https://untrusted.example.invalid")
+                        .contentType("application/json").content(credentials))
+                .andExpect(status().isForbidden())
+                .andExpect(header().doesNotExist("Access-Control-Allow-Origin"));
+    }
+
     @Test void validationAndOwnershipAreEnforced() throws Exception {
         mvc.perform(post("/api/v1/auth/register").contentType("application/json").content("{\"email\":\"bad\",\"password\":\"x\"}")).andExpect(status().is4xxClientError());
         Fixture f = fixture(), other = fixture();

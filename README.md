@@ -18,6 +18,8 @@ docker compose --profile core --profile graph up -d --build --wait --wait-timeou
 - MCP Streamable HTTP：http://127.0.0.1:13000/mcp
 - Neo4j Browser：http://127.0.0.1:17474
 
+浏览器访问支持 `http://127.0.0.1:13000` 和 `http://localhost:13000`，两者均在后端 CORS 允许列表中。新增页面域名或端口时，需要同步 `WebConfig.addCorsMappings` 并重建后端镜像。
+
 Worker 独立运行，内部 HTTP 端口只用于健康检查，没有发布宿主机端口。Compose 项目名为 `java-notebookagent`，数据卷与原项目分开。宿主机数据库端口为 MySQL `13317`、Redis `16381`、Milvus `19531`、Neo4j Bolt `17687`。
 
 ```powershell
@@ -46,7 +48,7 @@ npm run build
 npm run lint
 ```
 
-后端测试需要 Docker，Testcontainers 自动创建独立 MySQL/Redis 测试容器，不使用项目现有数据。`docker-java.properties` 固定兼容本机 Docker 的 API 版本。当前共 54 项测试，包含 17 项真实数据库/队列集成测试；外部模型的异常场景由本地 HTTP fixture 验证。
+后端测试需要 Docker，Testcontainers 自动创建独立 MySQL/Redis 测试容器，不使用项目现有数据。`docker-java.properties` 固定兼容本机 Docker 的 API 版本。当前共 55 项测试，包含 18 项真实数据库/队列及 HTTP 集成测试；外部模型的异常场景由本地 HTTP fixture 验证。
 
 真实服务验收脚本（会调用模型并产生少量费用，只创建和删除自己的测试资料）：
 
@@ -66,7 +68,6 @@ python verification/verify_protected.py
 - `backend/`：Java 后端、Flyway 迁移和测试。
 - `frontend/`：保留的 Vue 前端。
 - `config/`、`skills/`：MCP、评测和 literature-review 配置。
-- `phase0-spike/`：早期能力验证代码。
 - `verification/`：回归测试日志、真实部署验收脚本和报告。
 - `session-ses_*.md`：保留的 OpenCode 历史记录，不代表最终验收状态。
 

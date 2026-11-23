@@ -23,7 +23,6 @@ session-ses_*.md
 Codex聊天记录_*.md
 # Java build and local verification output
 backend/target/
-phase0-spike/target/
 verification/protected-baseline.json
 verification/runtime/
 verification/move-baseline.json
